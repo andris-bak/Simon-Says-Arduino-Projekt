@@ -1,8 +1,11 @@
 #include <LiquidCrystal.h>
+#include <EEPROM.h>                 // ÚJ: all-time high score miatt
+
+// ----- EEPROM cím a high score-nak -----
+const int EEPROM_ADDR_HS = 0;       // ide mentjük az all-time high score-t
 
 // ----- LCD -----
 LiquidCrystal lcd(11, 12, A0, A1, A2, A3); 
-// RS=11, E=12, D4=A0, D5=A1, D6=A2, D7=A3
 
 // ----- Simon Says beállítások -----
 const int NUM_BUTTONS = 4;
@@ -16,13 +19,16 @@ int sequenceSteps[MAX_STEPS];
 
 int level = 0;        // hány elem van most a sorozatban
 int userIndex = 0;    // hányadik elemet ütjük be
-int score = 0;        // pontszám (teljesített lépések száma)
+int score = 0;        // aktuális pontszám (jelen játék)
+
+int sessionHigh = 0;  // ÚJ: aktuális futás legjobb pontja
+int allTimeHigh = 0;  // ÚJ: EEPROM-ból töltött „örök” high score
 
 bool newRound = true;
 
-// sebesség: minél nagyobb a level, annál kisebbek a késleltetések
-int baseDelay = 400;      // kezdő villanási idő (ms)
-int minDelay  = 120;      // ennél gyorsabbra már ne menjen
+// sebesség: minél nagyobb a level, annál gyorsabb
+int baseDelay = 400;
+int minDelay  = 120;
 
 // ----- Segédfüggvények -----
 
@@ -32,7 +38,6 @@ void beep(int freq, int duration) {
   noTone(buzzerPin);
 }
 
-// egy LED felvillantása + hang
 void flashLed(int index, int duration) {
   digitalWrite(ledPins[index], HIGH);
   beep(400 + index * 120, duration); 
@@ -40,9 +45,7 @@ void flashLed(int index, int duration) {
   delay(80);
 }
 
-// a teljes sorozat lejátszása a játékosnak
 void showSequence(int len) {
-  // level alapján gyorsuljon
   int currentDelay = baseDelay - level * 15;
   if (currentDelay < minDelay) currentDelay = minDelay;
 
@@ -58,11 +61,9 @@ void showSequence(int len) {
   }
 }
 
-// gomb olvasása: visszaadja a gomb indexét (0–3), vagy -1-et, ha nincs nyomva
 int readButton() {
   for (int i = 0; i < NUM_BUTTONS; i++) {
-    if (digitalRead(buttonPins[i]) == LOW) { // INPUT_PULLUP -> lenyomva = LOW
-      // várjuk meg, míg felengedi (debounce)
+    if (digitalRead(buttonPins[i]) == LOW) { 
       while (digitalRead(buttonPins[i]) == LOW) {
         delay(1);
       }
@@ -74,8 +75,7 @@ int readButton() {
 }
 
 void gameOver() {
-  // villogtatjuk az összes LED-et párszor + „szomorú” hang
-  for (int i = 0; i < 3; i++)
+  for (int i = 0; i < 3; i++) {
     for (int j = 0; j < NUM_BUTTONS; j++) {
       digitalWrite(ledPins[j], HIGH);
     }
@@ -101,16 +101,18 @@ void victoryFlash() {
   }
 }
 
-// LCD frissítése: szint + pontszám
+// ----- LCD frissítés: level, score, session high -----
 void updateLcd() {
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Level: ");
+  lcd.print("Lvl:");
   lcd.print(level);
 
   lcd.setCursor(0, 1);
-  lcd.print("Score: ");
+  lcd.print("S:");
   lcd.print(score);
+  lcd.print(" HS:");
+  lcd.print(sessionHigh);   // ÚJ: mindig mutatjuk a futas legjobb pontjat
 }
 
 // játék reset
@@ -118,14 +120,14 @@ void resetGame() {
   level = 0;
   userIndex = 0;
   score = 0;
-  newRound = true;
+  // sessionHigh és allTimeHigh NEM nullázódik
+  newRound = true;        // <<< EZ HIÁNYZOTT
   updateLcd();
 }
 
 // ----- setup és loop -----
 
 void setup() {
-  // LED-ek, gombok
   for (int i = 0; i < NUM_BUTTONS; i++) {
     pinMode(ledPins[i], OUTPUT);
     digitalWrite(ledPins[i], LOW);
@@ -138,11 +140,16 @@ void setup() {
   lcd.print("SIMON SAYS");
   lcd.setCursor(0, 1);
   lcd.print("Press any key");
-  
-  // random seed
-  randomSeed(analogRead(A5));
 
-  // kis induló LED / hang animáció
+  // EEPROM-ból betöltjük az all-time high score-t
+  allTimeHigh = EEPROM.read(EEPROM_ADDR_HS);   // 0-255-ig bőven elég
+  sessionHigh = allTimeHigh;                   // induláskor a kettő ugyanaz
+
+  // random seed
+  //randomSeed(analogRead(A5));
+  
+
+  // kis induló animáció
   for (int i = 0; i < NUM_BUTTONS; i++) {
     digitalWrite(ledPins[i], HIGH);
     beep(500 + i * 150, 130);
@@ -150,10 +157,24 @@ void setup() {
     delay(80);
   }
 
-  // várjunk az első gombnyomásra, hogy induljon a játék
+  // várunk egy gombnyomásra
   while (readButton() == -1) {
-    // semmi, csak várakozás
+    // csak vár
   }
+  
+  // ------------------------------------------------
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Press any key");
+
+  unsigned long seed = 0;
+  while (readButton() == -1) {
+    seed++;
+    delay(1);
+  }
+  
+  randomSeed(seed);
+  // --------------------------------------------------
 
   resetGame();
 }
@@ -164,7 +185,7 @@ void loop() {
       sequenceSteps[level] = random(0, NUM_BUTTONS);
       level++;
     }
-    updateLcd();        // frissítjük a szintet
+    updateLcd();
     showSequence(level);
     userIndex = 0;
     newRound = false;
@@ -173,34 +194,44 @@ void loop() {
   int pressed = readButton();
 
   if (pressed != -1) {
-    // rövid visszajelzés: felvillan a lenyomott LED + hang
     flashLed(pressed, 120);
 
-    // jó gomb?
     if (pressed == sequenceSteps[userIndex]) {
       userIndex++;
-      score++;         // minden helyes lépésért +1 pont
+      score++;                 // aktuális pont
+
+      // --- HIGH SCORE FRISSÍTÉS ---  // ÚJ rész
+      if (score > sessionHigh) {
+        sessionHigh = score;   // futás közbeni legjobb
+      }
+      if (score > allTimeHigh) {
+        allTimeHigh = score;   // örök legjobb
+        EEPROM.write(EEPROM_ADDR_HS, allTimeHigh);  // elmentjük
+      }
+      // ------------------------------
+
       updateLcd();
 
-      // ha az összeset jól visszajátszotta
       if (userIndex >= level) {
         victoryFlash();
         delay(400);
-        newRound = true;   // következő szint
+        newRound = true;
       }
     } else {
       // rossz gomb -> game over
       gameOver();
+
       lcd.clear();
       lcd.setCursor(0, 0);
       lcd.print("GAME OVER");
       lcd.setCursor(0, 1);
-      lcd.print("Score: ");
+      lcd.print("S:");
       lcd.print(score);
+      lcd.print(" HS:");
+      lcd.print(allTimeHigh);   // itt az all-time high-t mutatjuk
 
-      delay(2000);
+      delay(2500);
 
-      // új játék
       resetGame();
     }
   }
